@@ -1,0 +1,16 @@
+[package]
+name = "mem-find"
+version = "0.1.0"
+authors = ["Martin Kröning <mkroening@posteo.net>"]
+edition = "2024"
+description = "Searches the memory of a process (haystack) for a string (needle)."
+repository = "https://github.com/mkroening/mem-find"
+license = "MIT OR Apache-2.0"
+keywords = ["procfs", "linux", "memory"]
+categories = ["command-line-utilities", "os::linux-apis"]
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+memchr = "2"
+nix = { version = "0.29", features = ["user"] }
