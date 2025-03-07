@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --all-features
-      - run: sudo target/debug/mem-find -v "Shell opt" $(pgrep bash)
+      - run: sudo RUST_LOG=trace target/debug/mem-find "Shell opt" $(pgrep bash)
 
   test:
     name: Test

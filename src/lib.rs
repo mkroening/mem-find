@@ -1,89 +1,127 @@
 use std::ffi::CStr;
 use std::fmt::{self, Write};
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::ops::Range;
-use std::os::unix::fs::{FileExt, MetadataExt};
+use std::os::unix::fs::FileExt;
 use std::str::{self, FromStr};
 
+use corosensei::{Coroutine, CoroutineResult};
 use libc::{ino_t, pid_t};
+use log::{error, info};
 use memchr::memmem;
-use nix::unistd::{Uid, User};
 
-pub fn find(verbose: bool, needle: &str, pid: pid_t) -> io::Result<()> {
-    let mut cmdline = fs::read_to_string(format!("/proc/{pid}/cmdline"))?;
-    for i in 0..cmdline.len() {
-        if cmdline.as_bytes()[i] == b'\0' {
-            cmdline.replace_range(i..=i, " ");
-        }
+pub struct Finder<'n> {
+    finder: memmem::Finder<'n>,
+}
+
+impl<'n> Finder<'n> {
+    #[inline]
+    pub fn new<B: ?Sized + AsRef<[u8]>>(needle: &'n B) -> Finder<'n> {
+        let finder = memmem::Finder::new(needle);
+        Self { finder }
     }
-    cmdline.pop();
 
-    let metadata = fs::metadata(format!("/proc/{pid}"))?;
-    let user = User::from_uid(Uid::from_raw(metadata.uid()))?.unwrap();
-    let name = &user.name;
+    #[inline]
+    pub fn find_iter(&self, pid: pid_t) -> io::Result<FindIter> {
+        FindIter::new(self.finder.as_ref(), pid)
+    }
+}
 
-    eprintln!("Searching for {needle:?} in process {pid} by {name}: `{cmdline}`");
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+pub struct FindIter {
+    coroutine: Coroutine<(), io::Result<(usize, String)>, ()>,
+}
 
-    let maps = File::open(format!("/proc/{pid}/maps"))?;
-    let maps = BufReader::new(maps);
+impl FindIter {
+    fn new(finder: memmem::Finder<'_>, pid: pid_t) -> io::Result<Self> {
+        let maps = File::open(format!("/proc/{pid}/maps"))?;
+        let maps = BufReader::new(maps);
 
-    let mem_path = format!("/proc/{pid}/mem");
-    let mem = File::open(&mem_path)?;
+        let mem_path = format!("/proc/{pid}/mem");
+        let mem = File::open(&mem_path)?;
 
-    let finder = memmem::Finder::new(needle);
-    for map in maps.lines() {
-        let map = map?;
-        let map = match map.parse::<Map>() {
-            Ok(map) => map,
-            Err(err) => {
-                eprintln!("could not parse map: {map} ({err:?})");
-                continue;
-            }
-        };
+        // FIXME: It would be great to make the coroutine depend on `'n` once it is possible.
+        let finder = finder.into_owned();
+        let coroutine = Coroutine::new(move |yielder, _input| {
+            for map in maps.lines() {
+                let map = match map {
+                    Ok(map) => map,
+                    Err(err) => {
+                        yielder.suspend(Err(err));
+                        continue;
+                    }
+                };
+                let map = match map.parse::<Map>() {
+                    Ok(map) => map,
+                    Err(err) => {
+                        error!("could not parse map: {map} ({err:?})");
+                        yielder.suspend(Err(io::Error::from(io::ErrorKind::InvalidData)));
+                        continue;
+                    }
+                };
 
-        if !map.perms.read {
-            continue;
-        }
+                info!("{map}");
 
-        if map.pathname.starts_with("[vvar") {
-            continue;
-        }
+                if !map.perms.read {
+                    continue;
+                }
 
-        if verbose {
-            eprintln!("{map}");
-        }
+                if map.pathname.starts_with("[vvar") {
+                    continue;
+                }
 
-        let mut haystack = vec![0; map.address.end - map.address.start];
+                let mut haystack = vec![0; map.address.end - map.address.start];
 
-        if let Err(err) = mem.read_exact_at(&mut haystack, map.address.start as u64) {
-            eprintln!("could not read {mem_path} at {:?}: {err}", map.address);
-            continue;
-        }
+                if let Err(err) = mem.read_exact_at(&mut haystack, map.address.start as u64) {
+                    error!("could not read {mem_path} at {:?}: {err}", map.address);
+                    yielder.suspend(Err(err));
+                    continue;
+                }
 
-        for pos in finder.find_iter(&haystack) {
-            eprint!("{:08x}: ", map.address.start + pos);
+                for spos in finder.find_iter(&haystack) {
+                    let pos = map.address.start + spos;
 
-            let bytes = &haystack[pos..];
+                    let bytes = &haystack[spos..];
 
-            if let Ok(s) = CStr::from_bytes_until_nul(bytes) {
-                eprintln!("{s:?}");
-                continue;
-            }
+                    if let Ok(s) = CStr::from_bytes_until_nul(bytes) {
+                        let s = s.to_string_lossy().into_owned();
+                        yielder.suspend(Ok((pos, s)));
+                        continue;
+                    }
 
-            let mut s = str::from_utf8(&bytes[..needle.len()]).unwrap();
-            for len in needle.len() + 1.. {
-                if let Ok(ok) = str::from_utf8(&bytes[..len]) {
-                    s = ok;
-                } else {
-                    break;
+                    let mut s = "";
+                    for len in 1.. {
+                        if let Ok(ok) = str::from_utf8(&bytes[..len]) {
+                            s = ok;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    let s = s.to_owned();
+                    yielder.suspend(Ok((pos, s)));
                 }
             }
-            eprintln!("{s:?}..");
+        });
+
+        Ok(Self { coroutine })
+    }
+}
+
+impl Iterator for FindIter {
+    type Item = io::Result<(usize, String)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.coroutine.done() {
+            return None;
+        }
+
+        match self.coroutine.resume(()) {
+            CoroutineResult::Yield(val) => Some(val),
+            CoroutineResult::Return(()) => None,
         }
     }
-
-    Ok(())
 }
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
