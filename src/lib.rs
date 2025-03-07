@@ -226,7 +226,7 @@ impl FromStr for Map {
             offset,
             dev: dev.to_owned(),
             inode,
-            pathname: pathname.to_owned(),
+            pathname: pathname.clone(),
         })
     }
 }
