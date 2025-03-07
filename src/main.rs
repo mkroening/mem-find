@@ -15,7 +15,8 @@ struct Args {
     needle: String,
 
     /// The PID of the process to search.
-    pid: Vec<pid_t>,
+    #[clap(id = "PID")]
+    pids: Vec<pid_t>,
 }
 
 fn main() -> ExitCode {
@@ -28,7 +29,7 @@ impl Args {
     fn run(&self) -> ExitCode {
         let mut success = true;
 
-        for pid in self.pid.iter().copied() {
+        for pid in self.pids.iter().copied() {
             if let Err(err) = mem_find::find(self.verbose, &self.needle, pid) {
                 eprintln!("{err}");
                 success = false;
