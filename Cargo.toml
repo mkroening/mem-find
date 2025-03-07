@@ -1,6 +1,6 @@
 [package]
 name = "mem-find"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Martin Kröning <mkroening@posteo.net>"]
 edition = "2024"
 description = "Searches the memory of a process (haystack) for a string (needle)."
