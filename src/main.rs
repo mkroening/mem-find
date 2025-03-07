@@ -88,7 +88,7 @@ fn find(verbose: bool, needle: &str, pid: pid_t) -> io::Result<()> {
             continue;
         }
 
-        if map.pathname == "[vvar]" {
+        if map.pathname.starts_with("[vvar") {
             continue;
         }
 
